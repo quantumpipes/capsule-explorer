@@ -78,6 +78,9 @@ export interface ChainSummary {
   head_hash: string;
   genesis_hash: string;
   all_hashes_ok: boolean;
+  signed_by?: string[];
+  started_at?: string | null;
+  ended_at?: string | null;
 }
 
 export interface Chain extends ChainSummary {
@@ -85,13 +88,34 @@ export interface Chain extends ChainSummary {
   capsules: Capsule[];
 }
 
+export interface MetaSummary {
+  length: number;
+  head_hash: string;
+  all_hashes_ok: boolean;
+}
+
 export interface ChainIndex {
   generated_at: string;
   public_key: string;
   fingerprint: string;
+  /** fingerprint -> public-key hex, for every signer this bundle can verify. */
+  keys?: Record<string, string>;
   chain_count: number;
   capsule_count: number;
+  /** The machine-wide meta-chain summary (chain-of-conversations), if present. */
+  meta?: MetaSummary | null;
   chains: ChainSummary[];
+}
+
+/** One conversation-seal in the meta-chain, decoded from a meta capsule. */
+export interface MetaEntry {
+  sequence: number;
+  tool: string;
+  session_id: string;
+  head_hash: string;
+  capsule_count: number;
+  /** The exported chain id this entry seals (tool-session), for navigation. */
+  chain_id: string;
 }
 
 // Per-capsule verification result computed client-side.

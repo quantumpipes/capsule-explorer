@@ -10,7 +10,7 @@
 //
 // Both modes resolve to the same Chain / ChainIndex shapes so the UI is mode-agnostic.
 
-import type { Capsule, Chain, ChainIndex, RawCapsule, RawChain } from "./types";
+import type { Capsule, Chain, ChainIndex, MetaEntry, RawCapsule, RawChain } from "./types";
 import { loadLiveChain, loadLiveIndex, serverVerifyChain, type ServerVerifyResult } from "./live-source";
 
 const STATIC_BASE = "/data/chains";
@@ -64,6 +64,44 @@ export async function loadChain(id: string): Promise<Chain> {
   if (!res.ok) throw new Error(`Could not load chain ${id} (${res.status}).`);
   const raw = (await res.json()) as RawChain;
   return { ...raw, capsules: raw.capsules.map(parseCapsule) };
+}
+
+/**
+ * Load the machine-wide meta-chain (chain-of-conversations), or null if the
+ * bundle has none. Static mode only: the meta-chain is a local seal, not a
+ * server concept. Each capsule's `outcome.result` carries the conversation seal.
+ */
+export async function loadMeta(): Promise<Chain | null> {
+  if (LIVE_BASE) return null;
+  const res = await fetch(`${STATIC_BASE}/meta.json`, { cache: "no-cache" });
+  if (!res.ok) return null;
+  const raw = (await res.json()) as RawChain;
+  return {
+    id: "meta",
+    tool: "meta",
+    title: "Meta-chain",
+    length: raw.capsules.length,
+    head_hash: (raw as unknown as { head_hash: string }).head_hash,
+    genesis_hash: (raw as unknown as { genesis_hash: string }).genesis_hash,
+    all_hashes_ok: (raw as unknown as { all_hashes_ok: boolean }).all_hashes_ok,
+    capsules: raw.capsules.map(parseCapsule),
+  };
+}
+
+/** Decode the conversation-seal payload from a meta capsule's outcome.result. */
+export function metaEntry(cap: Capsule, sequence: number): MetaEntry | null {
+  const r = (cap.outcome?.result ?? null) as Record<string, unknown> | null;
+  if (!r || r.kind !== "conversation_seal") return null;
+  const tool = String(r.tool ?? "");
+  const session_id = String(r.session_id ?? "");
+  return {
+    sequence,
+    tool,
+    session_id,
+    head_hash: String(r.head_hash ?? ""),
+    capsule_count: Number(r.capsule_count ?? 0),
+    chain_id: `${tool}-${session_id}`,
+  };
 }
 
 /** Live-mode verification, delegated to the Core server. */

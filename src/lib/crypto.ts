@@ -37,25 +37,38 @@ export function verifySignature(
   }
 }
 
+// Resolve the public key for a capsule from its signer fingerprint (`signed_by`).
+// Chains imported from a different or rotated key carry a fingerprint that maps,
+// via the bundled keyring, to the right key; everything else falls back to the
+// bundle's own public key.
+export type KeyResolver = (signedBy?: string) => string;
+
+export function keyResolver(
+  keys: Record<string, string> | undefined,
+  fallback: string,
+): KeyResolver {
+  return (signedBy?: string) => (signedBy && keys?.[signedBy]) || fallback;
+}
+
 export function verifyCapsule(
   cap: Capsule,
   prev: Capsule | null,
   index: number,
-  publicKey: string,
+  resolveKey: KeyResolver,
 ): CapsuleVerdict {
   const hashOk = verifyHash(cap.canonical, cap.hash);
-  const sigOk = verifySignature(cap.hash, cap.signature, publicKey);
+  const sigOk = verifySignature(cap.hash, cap.signature, resolveKey(cap.signed_by));
   const linkOk =
     cap.sequence === index &&
     (prev === null ? cap.previous_hash == null : cap.previous_hash === prev.hash);
   return { sequence: cap.sequence, id: cap.id, hashOk, sigOk, linkOk, ok: hashOk && sigOk && linkOk };
 }
 
-export function verifyChain(chain: Chain, publicKey: string): ChainVerdict {
+export function verifyChain(chain: Chain, resolveKey: KeyResolver): ChainVerdict {
   const results: CapsuleVerdict[] = [];
   let brokenAt: number | null = null;
   chain.capsules.forEach((cap, i) => {
-    const v = verifyCapsule(cap, i === 0 ? null : chain.capsules[i - 1], i, publicKey);
+    const v = verifyCapsule(cap, i === 0 ? null : chain.capsules[i - 1], i, resolveKey);
     results.push(v);
     if (!v.ok && brokenAt === null) brokenAt = i;
   });

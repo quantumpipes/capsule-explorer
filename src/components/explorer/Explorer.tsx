@@ -2,8 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   AlertTriangle,
+  ArrowDownUp,
   Boxes,
   Brain,
+  Code2,
+  Maximize2,
+  Network,
   CheckCircle2,
   ChevronRight,
   Copy,
@@ -22,9 +26,9 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
-import { loadChain, loadIndex, MODE, verifyOnServer } from "@/lib/data-source";
-import { verifyChain } from "@/lib/crypto";
-import type { Capsule, Chain, ChainIndex, ChainVerdict, CapsuleVerdict } from "@/lib/types";
+import { loadChain, loadIndex, loadMeta, metaEntry, MODE, verifyOnServer } from "@/lib/data-source";
+import { verifyChain, verifyHash, keyResolver } from "@/lib/crypto";
+import type { Capsule, Chain, ChainIndex, ChainVerdict, CapsuleVerdict, MetaEntry } from "@/lib/types";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -40,6 +44,21 @@ const typeStyle = (t: string) =>
   TYPE_STYLE[t] ?? { dot: "bg-slate-400", chip: "bg-slate-500/10 text-slate-300 ring-slate-500/20" };
 
 const short = (h: string | null | undefined, n = 10) => (h ? h.slice(0, n) : "genesis");
+
+/** Compact relative date for chain recency: "3h ago", "2d ago", or "Jun 9". */
+function relDate(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 
 function str(v: unknown, max = 800): string {
   if (v == null) return "";
@@ -107,12 +126,27 @@ function KeyVals({ data }: { data: Record<string, unknown> }) {
   if (entries.length === 0) return <p className="text-xs italic text-slate-600">empty</p>;
   return (
     <dl className="grid gap-2">
-      {entries.map(([k, v]) => (
-        <div key={k} className="grid grid-cols-[96px_1fr] items-start gap-3">
-          <dt className="pt-0.5 font-mono text-[10px] uppercase tracking-wide text-slate-500">{k}</dt>
-          <dd className="whitespace-pre-wrap break-words font-mono text-xs text-slate-300">{str(v)}</dd>
-        </div>
-      ))}
+      {entries.map(([k, v]) => {
+        // Objects/arrays get a full-width block so nested JSON has room to breathe;
+        // scalars stay in the compact label/value grid. min-w-0 + overflow-wrap let
+        // long paths and UUIDs wrap instead of forcing a horizontal scrollbar.
+        const isBlock = typeof v === "object" && v !== null;
+        return (
+          <div
+            key={k}
+            className={
+              isBlock
+                ? "min-w-0"
+                : "grid min-w-0 grid-cols-[88px_minmax(0,1fr)] items-start gap-3"
+            }
+          >
+            <dt className="pt-0.5 font-mono text-[10px] uppercase tracking-wide text-slate-500">{k}</dt>
+            <dd className="mt-1 min-w-0 whitespace-pre-wrap font-mono text-xs text-slate-300 [overflow-wrap:anywhere]">
+              {str(v, isBlock ? 4000 : 800)}
+            </dd>
+          </div>
+        );
+      })}
     </dl>
   );
 }
@@ -219,10 +253,12 @@ function CapsuleDetail({
   cap,
   verdict,
   onClose,
+  onExpand,
 }: {
   cap: Capsule | null;
   verdict: CapsuleVerdict | undefined;
   onClose?: () => void;
+  onExpand?: () => void;
 }) {
   if (!cap) {
     return (
@@ -244,13 +280,23 @@ function CapsuleDetail({
         </span>
         <span className="font-mono text-xs text-slate-500">#{cap.sequence}</span>
         <VerdictPips v={verdict} />
+        {onExpand && (
+          <button
+            onClick={onExpand}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:border-primary-500/40 hover:text-primary-300"
+            title="Expand capsule (deep dive) · E"
+            aria-label="Expand capsule"
+          >
+            <Maximize2 className="h-3 w-3" /> Expand
+          </button>
+        )}
         {onClose && (
-          <button onClick={onClose} className="ml-auto rounded p-1 text-slate-500 hover:text-slate-200 lg:hidden" aria-label="Close">
+          <button onClick={onClose} className={`rounded p-1 text-slate-500 hover:text-slate-200 lg:hidden ${onExpand ? "" : "ml-auto"}`} aria-label="Close">
             <X className="h-4 w-4" />
           </button>
         )}
       </div>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden p-4">
         {(() => {
           const rz = reasonedOf(cap);
           const tk = tokensOf(cap);
@@ -311,6 +357,265 @@ function CapsuleDetail({
   );
 }
 
+/* ----------------------------------------------------------- capsule deep dive */
+
+// The full-canvas reveal: every section with room to breathe, plus the exact
+// signed bytes laid bare with a live SHA3-256 check — proof that what you read
+// is what was sealed. Esc or backdrop closes.
+function CapsuleDeepDive({
+  cap,
+  verdict,
+  onClose,
+}: {
+  cap: Capsule;
+  verdict: CapsuleVerdict | undefined;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const ts = typeStyle(cap.type);
+  const rz = reasonedOf(cap);
+  const tk = tokensOf(cap);
+  const auth = authorityOf(cap);
+  const model = String((cap.reasoning as Record<string, unknown>)?.model ?? "");
+  const hashOk = verifyHash(cap.canonical, cap.hash);
+  const headline = str(cap.trigger?.request, 240) || str(cap.outcome?.summary, 240) || `${cap.type} capsule`;
+  const reduce = prefersReducedMotion();
+  const chip = "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium ring-1";
+
+  const sealRows: [string, string][] = [
+    ["hash", cap.hash],
+    ["previous", cap.previous_hash ?? "∅ genesis"],
+    ["signature", cap.signature],
+    ["signature_pq", cap.signature_pq || "—"],
+    ["signed_by", cap.signed_by || "n/a"],
+    ["signed_at", cap.signed_at || "—"],
+  ];
+
+  return (
+    <motion.div
+      className="fixed inset-0 z-[60] flex items-stretch justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-6"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.18 }}
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <motion.div
+        onClick={(e) => e.stopPropagation()}
+        initial={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 12 }}
+        animate={reduce ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
+        exit={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 8 }}
+        transition={{ type: "spring", stiffness: 320, damping: 30 }}
+        className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden border border-white/10 bg-surface-0 shadow-2xl shadow-black/60 sm:max-h-[90vh] sm:rounded-2xl"
+      >
+        {/* header */}
+        <div className="flex items-center gap-3 border-b border-white/[0.07] px-5 py-3.5">
+          <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ${ts.chip}`}>{cap.type}</span>
+          <span className="font-mono text-xs text-slate-500">#{cap.sequence}</span>
+          <VerdictPips v={verdict} />
+          <span className="ml-2 hidden min-w-0 flex-1 truncate text-sm text-slate-300 md:block">{headline}</span>
+          <button
+            onClick={onClose}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] px-2.5 py-1.5 text-xs text-slate-400 transition-colors hover:border-white/20 hover:text-slate-200"
+            aria-label="Close deep dive"
+          >
+            <X className="h-3.5 w-3.5" /> Close <span className="hidden font-mono text-[10px] text-slate-600 sm:inline">Esc</span>
+          </button>
+        </div>
+
+        {/* body */}
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overflow-x-hidden p-5">
+          <div className="flex flex-wrap gap-2">
+            {rz.blocks > 0 && (
+              <span className={`${chip} bg-violet-500/10 text-violet-300 ring-violet-500/20`}>
+                <Brain className="h-3 w-3" /> reasoned · {rz.blocks} block{rz.blocks > 1 ? "s" : ""}
+                {rz.redacted && <span className="opacity-60">(redacted)</span>}
+              </span>
+            )}
+            {tk.input + tk.output > 0 && (
+              <span className={`${chip} bg-slate-500/10 text-slate-300 ring-white/10`}>{fmt(tk.input)} → {fmt(tk.output)} tok</span>
+            )}
+            {auth && (
+              <span className={`${chip} ${auth === "autonomous" ? "bg-amber-500/10 text-amber-300 ring-amber-500/20" : "bg-info-500/10 text-info-300 ring-info-500/20"}`}>
+                <UserCheck className="h-3 w-3" /> {auth}
+              </span>
+            )}
+            {model && <span className={`${chip} bg-slate-500/10 text-slate-400 ring-white/10`}>{model}</span>}
+          </div>
+
+          {/* six sections, two columns for breathing room (Miyazaki's ma) */}
+          <div className="grid gap-3 lg:grid-cols-2">
+            {SECTIONS.map(({ key, name, icon: Icon, color }) => (
+              <div key={name} className="min-w-0 rounded-xl border border-white/[0.06] bg-surface-1/40 p-4">
+                <div className="mb-2.5 flex items-center gap-2">
+                  <Icon className={`h-3.5 w-3.5 ${color}`} />
+                  <h4 className="font-display text-[11px] font-semibold uppercase tracking-wider text-slate-300">{name}</h4>
+                </div>
+                <KeyVals data={cap[key] as Record<string, unknown>} />
+              </div>
+            ))}
+          </div>
+
+          {/* the reveal: the exact bytes that were hashed and signed */}
+          <div className="overflow-hidden rounded-xl border border-primary-500/20 bg-primary-500/[0.03]">
+            <div className="flex flex-wrap items-center gap-2 border-b border-primary-500/15 px-4 py-2.5">
+              <Code2 className="h-3.5 w-3.5 text-primary-400" />
+              <h4 className="font-display text-[11px] font-semibold uppercase tracking-wider text-primary-300">Raw canonical · the exact signed bytes</h4>
+              <span className={`ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 font-mono text-[10px] ring-1 ${hashOk ? "text-success-300 ring-success-500/30" : "text-error-300 ring-error-500/30"}`}>
+                {hashOk ? <ShieldCheck className="h-3 w-3" /> : <XCircle className="h-3 w-3" />} SHA3-256 {hashOk ? "matches seal" : "MISMATCH"}
+              </span>
+              <Copyable value={cap.canonical} className="text-slate-400 hover:text-slate-200">copy</Copyable>
+            </div>
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[11px] leading-relaxed text-slate-400 [overflow-wrap:anywhere]">{cap.canonical}</pre>
+          </div>
+
+          {/* full seal */}
+          <div className="rounded-xl border border-white/[0.06] bg-surface-1/40 p-4">
+            <div className="mb-2.5 flex items-center gap-2">
+              <Lock className="h-3.5 w-3.5 text-primary-400" />
+              <h4 className="font-display text-[11px] font-semibold uppercase tracking-wider text-slate-300">Cryptographic Seal</h4>
+            </div>
+            <dl className="grid gap-2 font-mono text-[11px]">
+              {sealRows.map(([label, val]) => (
+                <div key={label} className="grid min-w-0 grid-cols-[92px_minmax(0,1fr)] gap-3">
+                  <dt className="text-slate-500">{label}</dt>
+                  <dd className="min-w-0 [overflow-wrap:anywhere]">
+                    <Copyable value={val} className="text-left text-slate-300">{val}</Copyable>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+/* --------------------------------------------------------------- meta-chain */
+
+type MetaStatus = "intact" | "changed" | "missing";
+type MetaRow = MetaEntry & { status: MetaStatus; title: string; present: boolean };
+
+const metaStatusStyle: Record<MetaStatus, { dot: string; label: string; ring: string }> = {
+  intact: { dot: "bg-success-400", label: "intact", ring: "text-success-300 ring-success-500/25" },
+  changed: { dot: "bg-warning-400", label: "changed", ring: "text-warning-300 ring-warning-500/25" },
+  missing: { dot: "bg-error-400", label: "missing", ring: "text-error-300 ring-error-500/25" },
+};
+
+function MetaView({
+  meta,
+  rows,
+  verdict,
+  onVerify,
+  onOpen,
+}: {
+  meta: Chain;
+  rows: MetaRow[];
+  verdict: ChainVerdict | null;
+  onVerify: () => void;
+  onOpen: (chainId: string) => void;
+}) {
+  const intact = rows.filter((r) => r.status === "intact").length;
+  const issues = rows.length - intact;
+  const ordered = useMemo(() => [...rows].reverse(), [rows]); // newest conversation first
+
+  return (
+    <section className="flex min-h-0 min-w-0 flex-col lg:col-span-2">
+      {/* header */}
+      <div className="border-b border-white/[0.06] px-5 py-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Network className="h-4 w-4 text-primary-400" />
+            <h1 className="font-display text-base font-bold text-slate-100">Meta-chain</h1>
+          </div>
+          <span className="rounded-full bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-slate-400">
+            {rows.length} conversations
+          </span>
+          <button
+            onClick={onVerify}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-primary-500/30 bg-primary-500/[0.08] px-3 py-1.5 text-sm font-semibold text-primary-200 transition-colors hover:border-primary-500/50"
+          >
+            <ShieldCheck className="h-4 w-4" /> Verify meta-chain
+          </button>
+          {verdict && (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold ${
+                verdict.valid
+                  ? "border-success-500/30 bg-success-500/[0.06] text-success-300"
+                  : "border-error-500/30 bg-error-500/[0.06] text-error-300"
+              }`}
+            >
+              {verdict.valid ? <ShieldCheck className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+              {verdict.valid ? `${verdict.verified} links + signatures verified` : `broken at #${verdict.brokenAt}`}
+            </span>
+          )}
+        </div>
+        <p className="mt-2 max-w-3xl text-[13px] leading-relaxed text-slate-400">
+          One capsule per sealed conversation, each committing to that conversation's head hash. The
+          meta-chain's single head proves the whole corpus is complete: delete or truncate any
+          conversation and the seal recorded here no longer matches.
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[10px] text-slate-500">
+          <span className="flex items-center gap-1">
+            <Link2 className="h-3 w-3" /> head <Copyable value={meta.head_hash} className="text-slate-300">{short(meta.head_hash, 24)}…</Copyable>
+          </span>
+          <span className="text-success-400">{intact} intact</span>
+          {issues > 0 && <span className="text-warning-400">{issues} need attention</span>}
+        </div>
+      </div>
+
+      {/* conversation seals */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div className="space-y-1.5">
+          {ordered.map((r) => {
+            const ss = metaStatusStyle[r.status];
+            const v = verdict?.results[r.sequence];
+            return (
+              <button
+                key={r.sequence}
+                onClick={() => r.present && onOpen(r.chain_id)}
+                disabled={!r.present}
+                className={`group flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-all ${
+                  r.present
+                    ? "border-white/[0.06] bg-surface-1/40 hover:border-primary-500/30 hover:bg-primary-500/[0.04]"
+                    : "cursor-not-allowed border-error-500/20 bg-error-500/[0.03]"
+                }`}
+              >
+                <span className="flex w-9 shrink-0 items-center gap-1.5 font-mono text-[10px] text-slate-500">
+                  <span className={`h-2 w-2 rounded-full ${ss.dot}`} />
+                  {r.sequence}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] text-slate-200">{r.title}</span>
+                  <span className="mt-0.5 flex items-center gap-2 font-mono text-[9px] text-slate-500">
+                    <span className={`rounded px-1 py-0.5 uppercase tracking-wide ring-1 ${ss.ring}`}>{ss.label}</span>
+                    <span>{r.capsule_count} capsules</span>
+                    <span className="flex items-center gap-1"><Link2 className="h-2.5 w-2.5" />{short(r.head_hash, 12)}</span>
+                    {v && (
+                      <span className={v.ok ? "text-success-400" : "text-error-400"}>{v.ok ? "✓ sealed" : "✗ seal"}</span>
+                    )}
+                  </span>
+                </span>
+                {r.present && <ChevronRight className="h-4 w-4 shrink-0 text-slate-600 group-hover:text-primary-400" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ explorer */
 
 const PAGE = 60;
@@ -330,12 +635,18 @@ export default function Explorer() {
   const [tampered, setTampered] = useState(false);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [order, setOrder] = useState<"newest" | "oldest">("newest");
+  const [meta, setMeta] = useState<Chain | null>(null);
+  const [showMeta, setShowMeta] = useState(false);
+  const [metaVerdict, setMetaVerdict] = useState<ChainVerdict | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const [serverMsg, setServerMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const timers = useRef<number[]>([]);
 
   useEffect(() => {
     loadIndex().then(setIndex).catch((e) => setError(String(e.message ?? e)));
+    loadMeta().then(setMeta).catch(() => setMeta(null));
   }, []);
 
   useEffect(() => {
@@ -376,7 +687,39 @@ export default function Explorer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
-  const publicKey = index?.public_key ?? "";
+  const resolveKey = useMemo(
+    () => keyResolver(index?.keys, index?.public_key ?? ""),
+    [index],
+  );
+
+  // Cross-check each meta-chain seal against the conversation actually present in
+  // the bundle: head matches = intact, differs = changed, absent = missing.
+  const metaRows = useMemo<MetaRow[]>(() => {
+    if (!meta || !index) return [];
+    const byId = new Map(index.chains.map((c) => [c.id, c]));
+    const rows: MetaRow[] = [];
+    meta.capsules.forEach((cap, i) => {
+      const e = metaEntry(cap, i);
+      if (!e) return;
+      const present = byId.get(e.chain_id);
+      const status: MetaStatus = !present
+        ? "missing"
+        : present.head_hash === e.head_hash
+          ? "intact"
+          : "changed";
+      rows.push({ ...e, status, present: !!present, title: present?.title ?? e.session_id });
+    });
+    return rows;
+  }, [meta, index]);
+
+  const runMetaVerify = useCallback(() => {
+    if (meta) setMetaVerdict(verifyChain(meta, resolveKey));
+  }, [meta, resolveKey]);
+
+  const openChainFromMeta = useCallback((chainId: string) => {
+    setShowMeta(false);
+    setActiveId(chainId);
+  }, []);
 
   const runVerify = useCallback(() => {
     if (!chain || !working || !index) return;
@@ -399,7 +742,7 @@ export default function Explorer() {
     }
 
     const c: Chain = { ...chain, capsules: working };
-    const v = verifyChain(c, publicKey);
+    const v = verifyChain(c, resolveKey);
     setVerdict(v);
     setPhase("running");
     setRevealed(0);
@@ -425,7 +768,7 @@ export default function Explorer() {
         }, 340),
       );
     }
-  }, [chain, working, index, publicKey]);
+  }, [chain, working, index, resolveKey]);
 
   const runTamper = useCallback(() => {
     if (!chain) return;
@@ -477,7 +820,7 @@ export default function Explorer() {
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return caps
+    const list = caps
       .map((c, i) => ({ c, i }))
       .filter(({ c }) => typeFilter === "all" || c.type === typeFilter)
       .filter(({ c }) => {
@@ -485,7 +828,10 @@ export default function Explorer() {
         const hay = `${c.type} ${str(c.outcome?.summary, 200)} ${str(c.trigger?.request, 200)} ${c.hash}`.toLowerCase();
         return hay.includes(q);
       });
-  }, [caps, query, typeFilter]);
+    // Display newest-first by default; `i` stays the canonical sequence index so
+    // verification, links, and selection are unaffected by display order.
+    return order === "newest" ? list.reverse() : list;
+  }, [caps, query, typeFilter, order]);
   const filtering = query.trim() !== "" || typeFilter !== "all";
 
   const verdictByIdx = useMemo(() => {
@@ -503,6 +849,18 @@ export default function Explorer() {
   };
 
   const selectedCap = selectedSeq != null ? caps[selectedSeq] ?? null : null;
+
+  // Press E to expand the selected capsule into the deep dive (ignore while typing).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "e" && e.key !== "E") return;
+      const el = document.activeElement;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+      if (selectedCap) setExpanded(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedCap]);
 
   /* ----------------------------------------------------------------- render */
 
@@ -529,13 +887,33 @@ export default function Explorer() {
           <h2 className="font-display text-xs font-semibold uppercase tracking-wider text-slate-400">Chains</h2>
           <span className="rounded-full bg-surface-2 px-2 py-0.5 font-mono text-[9px] text-slate-500">{MODE}</span>
         </div>
+        {meta && (
+          <div className="px-3 pb-2">
+            <button
+              onClick={() => setShowMeta(true)}
+              className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-all ${
+                showMeta ? "border-primary-500/40 bg-primary-500/[0.08]" : "border-white/[0.06] bg-surface-1/40 hover:border-white/15"
+              }`}
+            >
+              <Network className="h-4 w-4 shrink-0 text-primary-400" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-medium text-slate-200">Meta-chain</span>
+                <span className="block font-mono text-[9px] text-slate-500">{meta.length} conversations · 1 head</span>
+              </span>
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.all_hashes_ok ? "bg-success-400" : "bg-error-400"}`} />
+            </button>
+          </div>
+        )}
         <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-3 pb-3">
           {index?.chains.map((ch) => {
-            const active = ch.id === activeId;
+            const active = ch.id === activeId && !showMeta;
             return (
               <button
                 key={ch.id}
-                onClick={() => setActiveId(ch.id)}
+                onClick={() => {
+                  setShowMeta(false);
+                  setActiveId(ch.id);
+                }}
                 className={`group w-full rounded-lg border p-2.5 text-left transition-all ${
                   active ? "border-primary-500/40 bg-primary-500/[0.07]" : "border-white/[0.06] bg-surface-1/40 hover:border-white/15"
                 }`}
@@ -551,6 +929,7 @@ export default function Explorer() {
                     </span>
                   )}
                   <span>{ch.length} capsules</span>
+                  {ch.ended_at && <span className="ml-auto text-slate-500">{relDate(ch.ended_at)}</span>}
                 </div>
               </button>
             );
@@ -566,6 +945,16 @@ export default function Explorer() {
         )}
       </aside>
 
+      {showMeta && meta ? (
+        <MetaView
+          meta={meta}
+          rows={metaRows}
+          verdict={metaVerdict}
+          onVerify={runMetaVerify}
+          onOpen={openChainFromMeta}
+        />
+      ) : (
+        <>
       {/* ---------- center: chain context + timeline ---------- */}
       <section className="flex min-h-0 min-w-0 flex-col">
         {!chain ? (
@@ -686,6 +1075,14 @@ export default function Explorer() {
                     </button>
                   ))}
                 </div>
+                <button
+                  onClick={() => setOrder((o) => (o === "newest" ? "oldest" : "newest"))}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-white/[0.08] px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:border-white/20 hover:text-slate-200"
+                  title={order === "newest" ? "Newest first (head → genesis)" : "Oldest first (genesis → head)"}
+                >
+                  <ArrowDownUp className="h-3 w-3" />
+                  {order === "newest" ? "Newest" : "Oldest"}
+                </button>
               </div>
             </div>
 
@@ -720,8 +1117,14 @@ export default function Explorer() {
 
       {/* ---------- detail pane (lg column) ---------- */}
       <aside className="hidden min-h-0 border-l border-white/[0.06] bg-surface-1/30 lg:block">
-        <CapsuleDetail cap={selectedCap} verdict={selectedSeq != null ? verdictByIdx.get(selectedSeq) : undefined} />
+        <CapsuleDetail
+          cap={selectedCap}
+          verdict={selectedSeq != null ? verdictByIdx.get(selectedSeq) : undefined}
+          onExpand={selectedCap ? () => setExpanded(true) : undefined}
+        />
       </aside>
+        </>
+      )}
 
       {/* ---------- detail slide-over (mobile) ---------- */}
       <AnimatePresence>
@@ -737,8 +1140,20 @@ export default function Explorer() {
               cap={selectedCap}
               verdict={selectedSeq != null ? verdictByIdx.get(selectedSeq) : undefined}
               onClose={() => setSelectedSeq(null)}
+              onExpand={() => setExpanded(true)}
             />
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ---------- capsule deep dive (full canvas) ---------- */}
+      <AnimatePresence>
+        {expanded && selectedCap && (
+          <CapsuleDeepDive
+            cap={selectedCap}
+            verdict={selectedSeq != null ? verdictByIdx.get(selectedSeq) : undefined}
+            onClose={() => setExpanded(false)}
+          />
         )}
       </AnimatePresence>
     </div>
