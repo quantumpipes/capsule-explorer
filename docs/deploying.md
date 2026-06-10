@@ -47,7 +47,21 @@ agent-capsule export --out public/data/chains
 npm run build                                   # then rebuild and redeploy
 ```
 
-Both commands write `public/data/chains/{index.json, <chain-id>.json}`. The exporter discovers `~/.agent-capsule/chains/*/*.db` by default; pass `--db PATH` or `--glob PATTERN` to export a subset.
+Both commands write `public/data/chains/{index.json, <chain-id>.json, meta.json}`. The exporter discovers `~/.agent-capsule/chains/*/*.db` by default; pass `--db PATH` or `--glob PATTERN` to export a subset.
+
+## Bundle size
+
+A full export of an active machine is large: one JSON file per conversation, carrying every capsule's exact canonical bytes. A few months of daily use is easily hundreds of megabytes, and `astro build` copies all of it into `dist/`. That is fine for **local** browsing (chains load lazily, one at a time), but it is the wrong thing to push to a public host.
+
+For a public deploy, export a small, curated set rather than your whole history:
+
+```bash
+agent-capsule export --out public/data/chains \
+  --db ~/.agent-capsule/chains/claude-code/<a-session>.db \
+  --db ~/.agent-capsule/chains/claude-code/<another>.db
+```
+
+`public/data/` is gitignored, so nothing is committed by default; what you deploy is whatever you exported at build time. Cloudflare and most static hosts gzip JSON automatically, and the per-file limit (25 MB on Cloudflare Pages) is rarely hit by a single conversation, but total transfer still grows with the bundle.
 
 ## Static vs live mode
 
@@ -60,7 +74,7 @@ For a public, shareable verifier, deploy static. The point of the explorer is th
 
 ## Privacy note
 
-Treat the exported bundle with the same care as the sessions it came from.
+Treat the exported bundle with the same care as the sessions it came from. **A full export is your entire coding history** (every prompt, response, file diff, and command). Do not publish it. For anything public, export a curated subset (see [Bundle size](#bundle-size)) or host behind access controls.
 
 - The bundle in `public/data/chains/` contains your **capsule contents** (prompts, responses, tool calls, outcomes) and the **public** signing key. It never contains the private key (`~/.agent-capsule/key` stays on your machine, `0600`).
 - The public key is safe to publish: it lets anyone verify and lets no one forge.

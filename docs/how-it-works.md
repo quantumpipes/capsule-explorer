@@ -29,7 +29,9 @@ If a single byte of the capsule's content changed after sealing, this hash chang
 
 ### 2. Signature
 
-`Ed25519`-verify the `signature` over the UTF-8 of the `hash` **hex string** (not the raw hash bytes), against the chain's `public_key`. This mirrors agent-capsule's Seal exactly: the signer signs the hex string of the hash.
+`Ed25519`-verify the `signature` over the UTF-8 of the `hash` **hex string** (not the raw hash bytes), against the signer's public key. This mirrors agent-capsule's Seal exactly: the signer signs the hex string of the hash.
+
+The key is resolved per capsule from its `signed_by` fingerprint against the bundle's `keys` map (the **keyring**), falling back to the top-level `public_key`. A bundle can therefore carry chains from more than one signer (an imported chain, a rotated key, a peer) and still verify every one of them offline. See [`keyResolver` in crypto.ts](../src/lib/crypto.ts).
 
 ```ts
 import { sha512 } from "@noble/hashes/sha512";
@@ -114,14 +116,19 @@ The exact byte layout (canonical JSON rules, hashing input, signature scheme) is
 ## The data-source flow
 
 ```
-public/data/chains/index.json      loadIndex()  -> chain summaries + public_key + fingerprint + tools
+public/data/chains/index.json      loadIndex()  -> chain summaries + public_key + keys (keyring) + meta
 public/data/chains/<id>.json       loadChain(id) -> RawChain { capsules: RawCapsule[] }
                                                     -> parseCapsule() per capsule
                                                     -> Chain { capsules: Capsule[] }
-                                   verifyChain(chain, index.public_key)  (in crypto.ts)
+                                   verifyChain(chain, keyResolver(index.keys, index.public_key))
+public/data/chains/meta.json       loadMeta()   -> the meta-chain (chain-of-conversations)
 ```
 
-`loadIndex` and `loadChain` fetch the static JSON in the default (static) mode. The public key the signatures are checked against comes from `index.json`, written by the exporter from `~/.agent-capsule/key`'s public half. In live mode (`PUBLIC_CAPSULE_API` set) the same shapes come from a server and verification is delegated to that server's `verify-chain` endpoint, because the client-side crypto needs the canonical bytes the static export carries.
+`loadIndex` and `loadChain` fetch the static JSON in the default (static) mode. The keys signatures are checked against come from `index.json`'s `keys` map (the keyring), written by the exporter from `~/.agent-capsule/key`'s public half plus any registered known keys. In live mode (`PUBLIC_CAPSULE_API` set) the same shapes come from a server and verification is delegated to that server's `verify-chain` endpoint, because the client-side crypto needs the canonical bytes the static export carries.
+
+## The meta-chain
+
+`meta.json` is a second hashchain whose capsules each seal one conversation: they record that conversation's head hash and capsule count. Because the meta-chain is itself hash-linked, its single head commits to every conversation ever sealed. The Explorer verifies it the same way (hashes, links, signatures via the keyring) and cross-checks each seal against the chains actually present in the bundle: a head that matches is **intact**, one that differs is **changed** (the conversation grew or was truncated), and one with no matching chain is **missing** (the conversation was deleted). This closes the two gaps a per-conversation chain cannot close alone: whole-conversation deletion and tail truncation.
 
 ## The tamper test
 

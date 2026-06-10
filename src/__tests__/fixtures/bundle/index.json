@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-06-09T16:40:25-05:00",
+  "public_key": "8343edd80a51889559aa1c7a39481c86746d06e09386afc8147d8176ef29310f",
+  "fingerprint": "8343edd80a518895",
+  "keys": {
+    "8343edd80a518895": "8343edd80a51889559aa1c7a39481c86746d06e09386afc8147d8176ef29310f"
+  },
+  "chain_count": 2,
+  "capsule_count": 3,
+  "meta": {
+    "length": 2,
+    "head_hash": "d668a5c72ebceb857898201733d74f8f0b5e891bd07daade9f81f5ed9e283f13",
+    "all_hashes_ok": true
+  },
+  "chains": [
+    {
+      "id": "claude-code-fixture-bravo",
+      "tool": "claude-code",
+      "title": "seal this conversation",
+      "length": 1,
+      "head_hash": "166554ec1f81b2470f20faceefb09bdd604796cf8560a69d6e85d18fa5ec3084",
+      "genesis_hash": "166554ec1f81b2470f20faceefb09bdd604796cf8560a69d6e85d18fa5ec3084",
+      "all_hashes_ok": true,
+      "signed_by": [
+        "8343edd80a518895"
+      ],
+      "started_at": "2026-06-09T21:40:25.557338+00:00",
+      "ended_at": "2026-06-09T21:40:25.557338+00:00"
+    },
+    {
+      "id": "claude-code-fixture-alpha",
+      "tool": "claude-code",
+      "title": "explain the capsule format",
+      "length": 2,
+      "head_hash": "5ab37786118666a206f60988d2bc3a56802170033d7ce0f689f3033ac89ee6ba",
+      "genesis_hash": "01eb28d27bfa7018db1e31d72bf00b44c0fbcbafc2a676588578afc7a0e69a4e",
+      "all_hashes_ok": true,
+      "signed_by": [
+        "8343edd80a518895"
+      ],
+      "started_at": "2026-06-09T21:40:25.549918+00:00",
+      "ended_at": "2026-06-09T21:40:25.550935+00:00"
+    }
+  ]
+}

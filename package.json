@@ -1,6 +1,6 @@
 {
   "name": "@quantumpipes/capsule-explorer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Capsule Explorer: navigate and cryptographically verify capsule hashchains from any AI coding agent (Claude Code, Cursor, Codex, Cline), in the browser, offline.",
   "type": "module",
   "author": "Quantum Pipes <hello@quantumpipes.com>",

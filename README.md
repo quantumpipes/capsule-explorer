@@ -64,10 +64,16 @@ Three client-side checks, identical to what agent-capsule's CLI does, run entire
 | Check | Mechanism |
 |-------|-----------|
 | **Hash** | `SHA3-256` over the capsule's `canonical` JSON bytes must equal the stored `hash`. |
-| **Signature** | `Ed25519` verify of the `signature` over the UTF-8 of the `hash` hex string, against the chain's `public_key`. |
+| **Signature** | `Ed25519` verify of the `signature` over the UTF-8 of the `hash` hex string, against the capsule's signer (resolved from the bundle's keyring by `signed_by`). |
 | **Link** | each capsule's `previous_hash` must equal the prior capsule's `hash`, and `sequence` must be consecutive from genesis. |
 
 The exported bundle ships the exact `canonical` bytes per capsule, so the browser never re-serializes anything; it hashes the same bytes the signer signed. Full detail, including the `@noble` verify call and the tamper-test behavior, is in [docs/how-it-works.md](docs/how-it-works.md). The on-the-wire byte format is pinned in agent-capsule's [wire-format.md](https://github.com/quantumpipes/agent-capsule/blob/main/docs/wire-format.md).
+
+## Beyond a single chain
+
+- **Keyring.** Each capsule is verified against its own signer, resolved from the bundle's `keys` map. A bundle can hold chains from several signers (an imported chain, a rotated key, a peer) and verify every one offline, not just the local key.
+- **Meta-chain.** A chain-of-conversations view whose single head commits to every sealed conversation. Each conversation shows an intact / changed / missing cross-check, so deleting or truncating any conversation is visible, not just tampering inside one.
+- **Deep dive.** Expand any capsule (button, or `E`) into a full-canvas view: every section with room to breathe, the exact signed bytes with a live SHA3-256 match check, and the full cryptographic seal, all copyable.
 
 ## Tool-agnostic
 
@@ -125,7 +131,8 @@ npm run build && npm test
 
 | Test | What it asserts |
 |------|-----------------|
-| `verify.test.ts` | recomputes SHA3-256 + Ed25519 over the **real exported chains**, asserts every chain verifies, a one-byte tamper breaks at the exact index, and a wrong public key is rejected. |
+| `crypto-fixture.test.ts` | recomputes SHA3-256 + Ed25519 over a small **committed fixture bundle** (runs in CI without the real corpus): every chain verifies via the keyring, a one-byte tamper breaks at the exact index, a wrong key is rejected, and the meta-chain verifies with full coverage. |
+| `verify.test.ts` | the same checks over the **real exported chains** when a bundle is present locally (skipped when absent). |
 | `build-integrity.test.ts` | the discovery and security surface: CSP plus immutable caching, canonical plus JSON-LD plus Open Graph. |
 
 ## Where the chains come from
